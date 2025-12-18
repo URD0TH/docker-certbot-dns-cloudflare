@@ -128,6 +128,34 @@ run_certbot() {
     fi
 }
 
+run_renewal() {
+    # Ensure the log directory is set to 700
+    chmod 700 /var/log/letsencrypt
+    chown "${PUID}:${PGID}" /var/log/letsencrypt
+
+    if is_default_privileges; then
+        certbot_cmd="certbot"
+    else
+        certbot_cmd="su-exec ${default_unprivileged_user} certbot"
+    fi
+
+    debug_print "Running certbot renewal with command: $certbot_cmd"
+
+    # Add -v flag if DEBUG is enabled
+    debug_flag=""
+    [ "$DEBUG" = "true" ] && debug_flag="-v"
+
+    $certbot_cmd $debug_flag renew \
+        --dns-cloudflare \
+        --dns-cloudflare-credentials "$CLOUDFLARE_CREDENTIALS_FILE" \
+        --dns-cloudflare-propagation-seconds "$CLOUDFLARE_PROPAGATION_SECONDS" \
+        --non-interactive
+    
+    if [ "$REPLACE_SYMLINKS" = "true" ]; then
+        replace_symlinks "/etc/letsencrypt/live"
+    fi
+}
+
 validate_environment_variables() {
     # Validate required environment variables
     for var in CLOUDFLARE_API_TOKEN CERTBOT_DOMAINS CERTBOT_EMAIL CERTBOT_KEY_TYPE CERTBOT_SERVER CLOUDFLARE_CREDENTIALS_FILE CLOUDFLARE_PROPAGATION_SECONDS; do
@@ -199,8 +227,15 @@ if [ $# -gt 0 ]; then
         exec su-exec "${default_unprivileged_user}" "$@"
     fi
 else
-    # Run certbot initially to get the certificates
-    run_certbot
+    # Check if certificates already exist to avoid redundant initial issuance
+    FIRST_DOMAIN=$(echo "$CERTBOT_DOMAINS" | cut -d',' -f1 | tr -d ' ')
+    if [ ! -d "/etc/letsencrypt/live/$FIRST_DOMAIN" ]; then
+        echo "No existing certificates found for $FIRST_DOMAIN. Starting initial issuance..."
+        run_certbot
+    else
+        echo "✅ Certificates already exist for $FIRST_DOMAIN. Skipping initial issuance."
+        run_renewal
+    fi
 
     # If RENEWAL_INTERVAL is set to 0, do not attempt to renew certificates and exit immediately
     if [ "$RENEWAL_INTERVAL" = "0" ]; then
@@ -228,9 +263,8 @@ else
         *) cleanup ;;
         esac
 
-        if ! run_certbot; then
-            echo "Error: Certificate renewal failed. Exiting."
-            exit 1
+        if ! run_renewal; then
+            echo "Error: Certificate renewal failed. Continuing to maintenance loop..."
         fi
     done
 fi
